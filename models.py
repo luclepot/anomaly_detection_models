@@ -1,7 +1,8 @@
 import sklearn.base
+from abc import abstractmethod, ABC
 from sklearn.utils import check_array, check_random_state
 
-class atlas_anomaly_detection_base(sklearn.base.BaseEstimator):
+class atlas_anomaly_detection_base(sklearn.base.BaseEstimator, ABC):
     """base class which inherits from the sklearn base estimator. Provides broad functionality for 
     declaring new model classes, including defining save and load functions.
     
@@ -29,7 +30,16 @@ class atlas_anomaly_detection_base(sklearn.base.BaseEstimator):
             raise FileNotFoundError('pathname "{}" not found.'.format(self.path))
         
         return 0
+
+    @abstractmethod
+    def fit(self, x, y):
+        raise NotImplementedError()
     
+    @abstractmethod
+    def predict(self, x):
+        raise NotImplementedError
+
+
 class SALAD(atlas_anomaly_detection_base):
     def __init__(
         self, random_state=None, path=None,
@@ -54,5 +64,6 @@ class SALAD(atlas_anomaly_detection_base):
     def fit_sr(self, x, y, epochs=10):
         self.random_state_sr = check_random_state(self.random_state)
 
-    def fit(self, x_sb, y_sb, x_sr, y_sr, epochs_sb=10, epochs_sr=10):
+    def fit(self, x_sb, y_sb, x_sr, y_sr, epochs_sb=10, epochs_sr=10, compile=True):
+        self.fig_sb(x_sb, y_sb, epochs_sb, compile=compile)
         return 0
