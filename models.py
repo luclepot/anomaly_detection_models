@@ -56,6 +56,39 @@ class anomaly_detection_base(sklearn.base.BaseEstimator, ABC):
         for k,v in local_variables.items():
             if k != 'self':
                 setattr(self, k, v)
+
+    def get_params(self, deep=True, copy_models=False):
+        """
+        Get parameters for this estimator.
+        Parameters
+        ----------
+        deep : bool, default=True
+            If True, will return the parameters for this estimator and
+            contained subobjects that are estimators.
+        Returns
+        -------
+        params : dict
+            Parameter names mapped to their values.
+        """
+        out = dict()
+        for key in self._get_param_names():
+            value = getattr(self, key)
+            if deep and hasattr(value, 'get_params'):
+                deep_items = value.get_params().items()
+                out.update((key + '__' + k, val) for k, val in deep_items)
+            
+            if key in self._MODEL_NAMES:
+                if isinstance(value, str):
+                    out[key] = value
+                else:
+                    # then it is a keras model
+                    if copy_models:
+                        out[key] = keras.models.clone_model(value)
+                    else:
+                        out[key] = value.to_json()
+            else:
+                out[key] = value
+        return out
         
 def _check_array_type(x):
     if isinstance(x, pd.DataFrame):
@@ -64,46 +97,40 @@ def _check_array_type(x):
         return x
     raise AttributeError('input array is of type "{}"; should be array'.format(type(x)))
 
-def _check_training_params(model, x, y, w=None):
+def _check_training_params(model, x, *y_args):
     """
     checks training dataset parameters x, y, and w against model <model>, including shapes and types
     """
-    x,y = _check_array_type(x), _check_array_type(y)
-    
+    x = _check_array_type(x)
+
+    y_args = list(y_args)
+    arg_shapes = []
+    for i in range(len(y_args)):
+        arg = y_args[i]
+        if arg is not None:
+            arg = _check_array_type(arg)
+            if len(np.squeeze(arg).shape) > 1:
+                raise AttributeError('one of the input y-style arrays is non-vector valued!')
+            arg_shapes.append(arg.size)
+        y_args[i] = arg
+
+    if len(np.unique(np.array(arg_shapes))) > 1:
+        raise AttributeError('input y value array shapes do not match')
+
     if not isinstance(model, keras.Model):
         raise AttributeError('model is not a keras.Model instance!')
-    
-    x_shape, y_shape = x.shape,y.shape
-    
+        
     input_match = model.input_shape[1] == np.array(x.shape)
-    output_match = model.output_shape[1] == np.array(y.shape)
     
     if not input_match.any():
-        raise AttributeError('x array shape {} does not match model input shape {}'.format(x_shape, model.input_shape))
-    if not output_match.any():
-        if len(output_match) == 1:
-            output_match = np.array([True])
-        else:
-            raise AttributeError('y array shape {} does not match model output shape {}'.format(y_shape, model.output_shape))
-
+        raise AttributeError('x array shape {} does not match model input shape {}'.format(x.shape, model.input_shape))
     if len(input_match) > 2:
         raise AttributeError('input array must have less than 3 dimensions')
-    if len(output_match) > 2:
-        raise AttributeError('output array must have less than 3 dimensions')
     
     if np.where(input_match)[0][0] == 0:
         x = x.T
-    if np.where(output_match)[0][0] == 0:
-        y = y.T
-        
-    if w is not None:
-        w = _check_array_type(w)
-        if w.shape != y.shape:
-            if w.T.shape != y.shape:
-                raise AttributeError('weight array shape {} must match y array shape {}'.format(y.shape, w.shape))
-            else:
-                w = w.T
-    return x, y, w
+
+    return tuple([x] + y_args)
 
 def _validate_model(model, name):
     if model is None:
@@ -117,24 +144,59 @@ def _validate_model(model, name):
 
 class SALAD(anomaly_detection_base):
     def __init__(
-        self, sb_model=None, sr_model=None, 
+        self, sb_model=None, model=None, 
         optimizer='adam', metrics=[], loss='binary_crossentropy', 
-        sr_epochs=10, sb_epochs=10, sr_batch_size=1000, sb_batch_size=1000,
+        epochs=10, sb_epochs=10, batch_size=1000, sb_batch_size=1000,
         compile=True, callbacks=[], test_size=0.3, verbose=False,
-        dctr_epsilon=1e-5, m_cols=None
+        dctr_epsilon=1e-5,
     ):
         self._inputs_to_attributes(locals())
+        self._MODEL_NAMES = ['model', 'sb_model']
 
-    def fit_sb(self, x, y, w=None):
+    def fit(
+        self, x, y_sim=None, y_sr=None, w=None, m=None
+    ):
+        if y_sim is None:
+            raise ValueError('parameter <y_sim> must hold simulation/data tags!')
+        if y_sr is None:
+            raise ValueError('parameter <y_sr> must hold signal region/sideband tags!')
+        if m is None:
+            raise ValueError('parameter <m> must be a localizing feature for SALAD!')
+        
+        sb_tag, sr_tag = ~y_sr.astype(bool), y_sr.astype(bool)
+        sb_hist = self._fit_sb(x[sb_tag], y_sim[sb_tag], w=(w[sb_tag] if w is not None else w), m=m[sb_tag])
+        sr_hist = self._fit_sr(x[sr_tag], y_sim[sr_tag], w=(w[sr_tag] if w is not None else w), m=m[sr_tag])
+
+        return sb_hist, sr_hist
+
+    def predict(
+        self, x
+    ):
+        return self.model.predict(x, batch_size=_DEFAULT_PREDICTION_BATCH_SIZE).squeeze()
+
+    def predict_weight(
+        self, x
+    ):
+        yhat = self.sb_model.predict(x, batch_size=_DEFAULT_PREDICTION_BATCH_SIZE)
+        return np.squeeze(yhat/(1 + self.dctr_epsilon - yhat))
+
+    def _fit_sb(
+        self, x, y_sim, w=None, m=None
+    ):
 
         self.sb_model = _validate_model(self.sb_model, 'sb_model')
-        x, y, w = _check_training_params(self.sb_model, x, y, w)
+        if len(m.shape) < 2:
+            m = m[:,np.newaxis]
+        x = np.concatenate([m, x], axis=1)
+        x, y_sim, w = _check_training_params(self.sb_model, x, y_sim, w)
         
+
+
         if self.compile:
             self.sb_model.compile(loss=self.loss, optimizer=self.optimizer, metrics=self.metrics)
 
         return self.sb_model.fit(
-            x, y,
+            x, y_sim,
             epochs=self.sb_epochs,
             callbacks=self.callbacks,
             validation_split=self.test_size,
@@ -144,21 +206,22 @@ class SALAD(anomaly_detection_base):
         )
         return 0
 
-    def fit_sr(self, x, y, w=None):
+    def _fit_sr(
+        self, x, y_sim, w=None, m=None
+    ):
 
-        self.sr_model = _validate_model(self.sr_model, 'sr_model')
+        self.model = _validate_model(self.model, 'model')
         self.sb_model = _validate_model(self.sb_model, 'sb_model')
         
-        if len(self.m_cols) == 0:
-            raise AttributeError('Parameter <m_cols> should have at least one localizing feature column!')
+        if len(m.shape) < 2:
+            m = m[:,np.newaxis]
+        x_dctr = np.concatenate([m, x], axis=1)
 
-        mask = np.ones(x.shape[1], dtype=bool)
-        mask[self.m_cols] = False
+        x_dctr, = _check_training_params(self.sb_model, x_dctr)
+        x, y_sim, w = _check_training_params(self.model, x, y_sim, w)
         
-        x_dctr,_,_ = _check_training_params(self.sb_model, x, y, w)
-        x, y, w = _check_training_params(self.sr_model, x[:,mask], y, w)
         w_dctr = self.predict_weight(x_dctr)
-        w_dctr[y == 1] = 1
+        w_dctr[y_sim == 1] = 1
 
         if w is not None:
             if w.shape != w_dctr.shape:
@@ -168,52 +231,10 @@ class SALAD(anomaly_detection_base):
             w = w_dctr
 
         if self.compile:
-            self.sr_model.compile(loss=self.loss, optimizer=self.optimizer, metrics=self.metrics)
-
-        return self.sr_model.fit(
-            x, y,
-            epochs=self.sr_epochs,
-            callbacks=self.callbacks,
-            validation_split=self.test_size,
-            batch_size=int(self.sr_batch_size),
-            sample_weight=w,
-            verbose=self.verbose
-        )
-
-    def fit(self, x_sb, y_sb, x_sr, y_sr, w_sb=None, w_sr=None):
-        
-        sb_hist = self.fit_sb(x_sb, y_sb, w=w_sb)
-        sr_hist = self.fit_sr(x_sr, y_sr, w=w_sr)
-
-        return sb_hist,sr_hist
-
-    def predict(self, x, batch_size=_DEFAULT_PREDICTION_BATCH_SIZE):
-        mask = np.ones(x.shape[1], dtype=bool)
-        mask[self.m_cols] = False
-        return self.sr_model.predict(x[:,mask], batch_size=batch_size).squeeze()
-
-    def predict_weight(self, x, batch_size=_DEFAULT_PREDICTION_BATCH_SIZE):
-        yhat = self.sb_model.predict(x, batch_size=batch_size)
-        return np.squeeze(yhat/(1 + self.dctr_epsilon - yhat))
-
-class data_vs_sim(anomaly_detection_base):
-    def __init__(
-        self, model=None, optimizer='adam', metrics=[], 
-        loss='binary_crossentropy', epochs=10, batch_size=1000,
-        compile=True, callbacks=[], test_size=0.3, verbose=False,
-    ):
-        self._inputs_to_attributes(locals())
-
-    def fit(self, x, y, w=None):
-
-        self.model = _validate_model(self.model, 'model')
-        x, y, w = _check_training_params(self.model, x, y, w)
-        
-        if self.compile:
             self.model.compile(loss=self.loss, optimizer=self.optimizer, metrics=self.metrics)
 
         return self.model.fit(
-            x, y,
+            x, y_sim,
             epochs=self.epochs,
             callbacks=self.callbacks,
             validation_split=self.test_size,
@@ -222,5 +243,88 @@ class data_vs_sim(anomaly_detection_base):
             verbose=self.verbose
         )
 
-    def predict(self, x, batch_size=_DEFAULT_PREDICTION_BATCH_SIZE):
-        return self.model.predict(x, batch_size=batch_size).squeeze()
+
+class data_vs_sim(anomaly_detection_base):
+    def __init__(
+        self, model=None, optimizer='adam', metrics=[], 
+        loss='binary_crossentropy', epochs=10, batch_size=1000,
+        compile=True, callbacks=[], test_size=0.3, verbose=False,
+    ):
+        self._inputs_to_attributes(locals())
+        self._MODEL_NAMES = ['model']
+
+    def fit(
+        self, x, y_sim=None, y_sr=None, w=None, m=None
+    ):
+        if y_sim is None:
+            raise ValueError('parameter <y_sim> must hold simulation/data tags!')
+        
+        self.model = _validate_model(self.model, 'model')
+        x, y_sim, y_sr, w = _check_training_params(self.model, x, y_sim, y_sr, w)
+        
+        if y_sr is not None:
+            x = x[y_sr == 1]
+            if w is not None:
+                w = w[y_sr == 1]
+            y_sim = y_sim[y_sr == 1]
+
+        if self.compile:
+            self.model.compile(loss=self.loss, optimizer=self.optimizer, metrics=self.metrics)
+
+        return self.model.fit(
+            x, y_sim,
+            epochs=self.epochs,
+            callbacks=self.callbacks,
+            validation_split=self.test_size,
+            batch_size=int(self.batch_size),
+            sample_weight=w,
+            verbose=self.verbose
+        )
+
+    def predict(
+        self, x
+    ):
+        return self.model.predict(x, batch_size=_DEFAULT_PREDICTION_BATCH_SIZE).squeeze()
+
+class cwola(anomaly_detection_base):
+    def __init__(
+        self, model=None, optimizer='adam', metrics=[], 
+        loss='binary_crossentropy', epochs=10, batch_size=1000,
+        compile=True, callbacks=[], test_size=0.3, verbose=False,
+    ):
+        self._inputs_to_attributes(locals())
+        self._MODEL_NAMES = ['model']
+
+    def fit(
+        self, x, y_sim=None, y_sr=None, w=None, m=None
+    ):
+
+        if y_sr is None:
+            raise ValueError('parameter <y_sr> must hold signal region/sideband tags!')
+
+        self.model = _validate_model(self.model, 'model')
+        x, y_sim, y_sr, w = _check_training_params(self.model, x, y_sim, y_sr, w)
+        
+        if y_sim is not None:
+            x = x[y_sim == 1]
+            y_sr = y_sr[y_sim == 1]
+            if w is not None:
+                w = w[y_sim == 1]
+        
+        if self.compile:
+            self.model.compile(loss=self.loss, optimizer=self.optimizer, metrics=self.metrics)
+
+        return self.model.fit(
+            x, y_sr,
+            epochs=self.epochs,
+            callbacks=self.callbacks,
+            validation_split=self.test_size,
+            batch_size=int(self.batch_size),
+            sample_weight=w,
+            verbose=self.verbose
+        )
+
+    def predict(
+        self, x
+    ):
+        return self.model.predict(x, batch_size=_DEFAULT_PREDICTION_BATCH_SIZE).squeeze()
