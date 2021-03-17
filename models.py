@@ -1,6 +1,19 @@
 import sklearn.base
 from abc import abstractmethod, ABC
 from sklearn.utils import check_array, check_random_state
+import pandas as pd
+import numpy as np
+
+try:
+    import keras
+except ModuleNotFoundError:
+    pass
+try:
+    import tensorflow.keras as keras
+except ModuleNotFoundError:
+    raise ModuleNotFoundError('Could not find a working distribution of Keras!')
+
+_DEFAULT_PREDICTION_BATCH_SIZE = 50000
 
 class anomaly_detection_base(sklearn.base.BaseEstimator, ABC):
     """base class which inherits from the sklearn base estimator. Provides broad functionality for 
@@ -44,7 +57,6 @@ class anomaly_detection_base(sklearn.base.BaseEstimator, ABC):
             if k != 'self':
                 setattr(self, k, v)
         
-
 def _check_array_type(x):
     if isinstance(x, pd.DataFrame):
         return x.values
@@ -93,41 +105,122 @@ def _check_training_params(model, x, y, w=None):
                 w = w.T
     return x, y, w
 
+def _validate_model(model, name):
+    if model is None:
+        raise ValueError('parameter <{}> is None. Please set it to a valid keras model/keras json architecture.'.format(name))
+    elif isinstance(model, str):
+        try:
+            model = keras.models.model_from_json(model)
+        except JSONDecodeError:
+            raise ValueError('parameter <{}> with value "{}" could not be decoded.'.format(name, model))
+    return model
+
 class SALAD(anomaly_detection_base):
     def __init__(
-        self, path=None, sb_model=None, sr_model=None, 
+        self, sb_model=None, sr_model=None, 
         optimizer='adam', metrics=[], loss='binary_crossentropy', 
-        sr_epochs=10, sb_epochs=10, compile=True, callbacks=[], 
-        sb_arch=None, sr_arch=None, test_size=0.3,
+        sr_epochs=10, sb_epochs=10, sr_batch_size=1000, sb_batch_size=1000,
+        compile=True, callbacks=[], test_size=0.3, verbose=False,
+        dctr_epsilon=1e-5, m_cols=None
     ):
         self._inputs_to_attributes(locals())
 
     def fit_sb(self, x, y, w=None):
-        if self.sb_model is None:
-            raise ValueError('parameter <sb_model> is None. Please set it to a valid keras model.')
-        
+
+        self.sb_model = _validate_model(self.sb_model, 'sb_model')
         x, y, w = _check_training_params(self.sb_model, x, y, w)
-        self.sb_model.fit(
+        
+        if self.compile:
+            self.sb_model.compile(loss=self.loss, optimizer=self.optimizer, metrics=self.metrics)
+
+        return self.sb_model.fit(
             x, y,
+            epochs=self.sb_epochs,
+            callbacks=self.callbacks,
+            validation_split=self.test_size,
+            batch_size=int(self.sb_batch_size),
+            sample_weight=w,
+            verbose=self.verbose
         )
         return 0
 
     def fit_sr(self, x, y, w=None):
-        if self.sr_model is None:
-            raise ValueError('parameter <sb_model> is None. Please set it to a valid keras model.')
+
+        self.sr_model = _validate_model(self.sr_model, 'sr_model')
+        self.sb_model = _validate_model(self.sb_model, 'sb_model')
         
-        x, y, w = _check_training_params(self.sr_model, x, y, w)
-        self.sr_model.fit(
+        if len(self.m_cols) == 0:
+            raise AttributeError('Parameter <m_cols> should have at least one localizing feature column!')
+
+        mask = np.ones(x.shape[1], dtype=bool)
+        mask[self.m_cols] = False
+        
+        x_dctr,_,_ = _check_training_params(self.sb_model, x, y, w)
+        x, y, w = _check_training_params(self.sr_model, x[:,mask], y, w)
+        w_dctr = self.predict_weight(x_dctr)
+        w_dctr[y == 1] = 1
+
+        if w is not None:
+            if w.shape != w_dctr.shape:
+                raise AttributeError('given weight {} and DCTR weight {} do not match!'.format(w.shape, w_dctr.shape))
+            w *= w_dctr
+        else:
+            w = w_dctr
+
+        if self.compile:
+            self.sr_model.compile(loss=self.loss, optimizer=self.optimizer, metrics=self.metrics)
+
+        return self.sr_model.fit(
             x, y,
+            epochs=self.sr_epochs,
+            callbacks=self.callbacks,
+            validation_split=self.test_size,
+            batch_size=int(self.sr_batch_size),
+            sample_weight=w,
+            verbose=self.verbose
         )
-        return 0 
 
-    def fit(self, x_sb, y_sb, x_sr, y_sr):
+    def fit(self, x_sb, y_sb, x_sr, y_sr, w_sb=None, w_sr=None):
         
-        self.fit_sb(x_sb, y_sb)
-        self.fit_sr(x_sr, y_sr)
+        sb_hist = self.fit_sb(x_sb, y_sb, w=w_sb)
+        sr_hist = self.fit_sr(x_sr, y_sr, w=w_sr)
 
-        return 0
+        return sb_hist,sr_hist
 
-    def predict(self, x):
-        raise NotImplementedError()
+    def predict(self, x, batch_size=_DEFAULT_PREDICTION_BATCH_SIZE):
+        mask = np.ones(x.shape[1], dtype=bool)
+        mask[self.m_cols] = False
+        return self.sr_model.predict(x[:,mask], batch_size=batch_size).squeeze()
+
+    def predict_weight(self, x, batch_size=_DEFAULT_PREDICTION_BATCH_SIZE):
+        yhat = self.sb_model.predict(x, batch_size=batch_size)
+        return np.squeeze(yhat/(1 + self.dctr_epsilon - yhat))
+
+class data_vs_sim(anomaly_detection_base):
+    def __init__(
+        self, model=None, optimizer='adam', metrics=[], 
+        loss='binary_crossentropy', epochs=10, batch_size=1000,
+        compile=True, callbacks=[], test_size=0.3, verbose=False,
+    ):
+        self._inputs_to_attributes(locals())
+
+    def fit(self, x, y, w=None):
+
+        self.model = _validate_model(self.model, 'model')
+        x, y, w = _check_training_params(self.model, x, y, w)
+        
+        if self.compile:
+            self.model.compile(loss=self.loss, optimizer=self.optimizer, metrics=self.metrics)
+
+        return self.model.fit(
+            x, y,
+            epochs=self.epochs,
+            callbacks=self.callbacks,
+            validation_split=self.test_size,
+            batch_size=int(self.batch_size),
+            sample_weight=w,
+            verbose=self.verbose
+        )
+
+    def predict(self, x, batch_size=_DEFAULT_PREDICTION_BATCH_SIZE):
+        return self.model.predict(x, batch_size=batch_size).squeeze()
