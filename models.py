@@ -2,6 +2,8 @@ import sklearn.base
 from abc import abstractmethod, ABC
 from sklearn.utils import check_array, check_random_state
 import pandas as pd
+import os
+import pickle
 import numpy as np
 
 try:
@@ -23,26 +25,53 @@ class anomaly_detection_base(sklearn.base.BaseEstimator, ABC):
     <path> should be a directory for the model; it may not yet exist.
     """
 
-    def save(self, mkdirs=True):
-        if self.path is None:
-            raise ValueError('class variable <path> is None!')
+    def save(self, path, mkdirs=True):
         
-        if not os.path.exists(self.path):
+        if not os.path.exists(path):
             if mkdirs:
-                os.makedirs(self.path)
+                os.makedirs(path)
             else:
-                raise FileNotFoundError('pathname "{}" not found. Set <mkdirs=True> to create directories.'.format(self.path))
-        
-        return 0
-    
-    def load(self):
-        if self.path is None:
-            raise ValueError('class variable <path> is None!')
+                raise FileNotFoundError('pathname "{}" not found. Set <mkdirs=True> to create directories.'.format(path))
+        save_dict = self.get_params(exact_models=True)
+        save_dict['classname'] = self.__class__.__name__
 
-        if not os.path.exists(self.path):
-            raise FileNotFoundError('pathname "{}" not found.'.format(self.path))
+        models = dict()
+        for k in list(save_dict.keys()):
+            if k in self._MODEL_NAMES:
+                models[k] = save_dict.pop(k)
+
+        for k,model in models.items():
+            mpath = '{}/{}'.format(path,k)
+            model = _validate_model(model, k)
+            model.save(mpath)
+
+        with open('{}/params.pkl'.format(path), 'wb') as f:
+            pickle.dump(save_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
         
-        return 0
+    def load(self, path):
+
+        if not os.path.exists(path):
+            raise FileNotFoundError('pathname "{}" not found.'.format(path))
+        
+        pkl_path = '{}/params.pkl'.format(path)
+        if not os.path.exists(pkl_path):
+            raise FileNotFoundError('file "{}" not found. cannot load model.'.format(pkl_path))
+        with open(pkl_path, 'rb') as f:
+            save_dict = pickle.load(f)
+        
+        classname = save_dict.pop('classname')
+
+        if classname != self.__class__.__name__:
+            raise ValueError('tried to load savefile of class "{}" into object with class "{}"!'.format(classname, self.__class__.__name__))
+
+        for k in self._MODEL_NAMES:
+            model_path = '{}/{}'.format(path, k)
+            if os.path.exists(model_path):
+                save_dict[k] = keras.models.load_model(model_path)
+            else:
+                save_dict[k] = None
+
+        self.set_params(**save_dict)
 
     @abstractmethod
     def fit(self, x, y):
@@ -57,7 +86,7 @@ class anomaly_detection_base(sklearn.base.BaseEstimator, ABC):
             if k != 'self':
                 setattr(self, k, v)
 
-    def get_params(self, deep=True, copy_models=False):
+    def get_params(self, deep=True, copy_models=False, exact_models=False):
         """
         Get parameters for this estimator.
         Parameters
@@ -80,9 +109,13 @@ class anomaly_detection_base(sklearn.base.BaseEstimator, ABC):
             if key in self._MODEL_NAMES:
                 if isinstance(value, str):
                     out[key] = value
+                elif value is None:
+                    out[key] = None
                 else:
                     # then it is a keras model
-                    if copy_models:
+                    if exact_models:
+                        out[key] = value
+                    elif copy_models:
                         out[key] = keras.models.clone_model(value)
                     else:
                         out[key] = value.to_json()
@@ -147,7 +180,7 @@ class SALAD(anomaly_detection_base):
         self, sb_model=None, model=None, 
         optimizer='adam', metrics=[], loss='binary_crossentropy', 
         epochs=10, sb_epochs=10, batch_size=1000, sb_batch_size=1000,
-        compile=True, callbacks=[], test_size=0.3, verbose=False,
+        compile=True, callbacks=[], test_size=0., verbose=False,
         dctr_epsilon=1e-5,
     ):
         self._inputs_to_attributes(locals())
@@ -204,7 +237,7 @@ class SALAD(anomaly_detection_base):
             sample_weight=w,
             verbose=self.verbose
         )
-        return 0
+        
 
     def _fit_sr(
         self, x, y_sim, w=None, m=None
@@ -243,12 +276,11 @@ class SALAD(anomaly_detection_base):
             verbose=self.verbose
         )
 
-
 class data_vs_sim(anomaly_detection_base):
     def __init__(
         self, model=None, optimizer='adam', metrics=[], 
         loss='binary_crossentropy', epochs=10, batch_size=1000,
-        compile=True, callbacks=[], test_size=0.3, verbose=False,
+        compile=True, callbacks=[], test_size=0., verbose=False,
     ):
         self._inputs_to_attributes(locals())
         self._MODEL_NAMES = ['model']
@@ -290,7 +322,50 @@ class cwola(anomaly_detection_base):
     def __init__(
         self, model=None, optimizer='adam', metrics=[], 
         loss='binary_crossentropy', epochs=10, batch_size=1000,
-        compile=True, callbacks=[], test_size=0.3, verbose=False,
+        compile=True, callbacks=[], test_size=0., verbose=False,
+    ):
+        self._inputs_to_attributes(locals())
+        self._MODEL_NAMES = ['model']
+
+    def fit(
+        self, x, y_sim=None, y_sr=None, w=None, m=None
+    ):
+
+        if y_sr is None:
+            raise ValueError('parameter <y_sr> must hold signal region/sideband tags!')
+
+        self.model = _validate_model(self.model, 'model')
+        x, y_sim, y_sr, w = _check_training_params(self.model, x, y_sim, y_sr, w)
+        
+        if y_sim is not None:
+            x = x[y_sim == 1]
+            y_sr = y_sr[y_sim == 1]
+            if w is not None:
+                w = w[y_sim == 1]
+        
+        if self.compile:
+            self.model.compile(loss=self.loss, optimizer=self.optimizer, metrics=self.metrics)
+
+        return self.model.fit(
+            x, y_sr,
+            epochs=self.epochs,
+            callbacks=self.callbacks,
+            validation_split=self.test_size,
+            batch_size=int(self.batch_size),
+            sample_weight=w,
+            verbose=self.verbose
+        )
+
+    def predict(
+        self, x
+    ):
+        return self.model.predict(x, batch_size=_DEFAULT_PREDICTION_BATCH_SIZE).squeeze()
+
+class sacwola(anomaly_detection_base):
+    def __init__(
+        self, model=None, optimizer='adam', metrics=[], 
+        loss='binary_crossentropy', epochs=10, batch_size=1000,
+        compile=True, callbacks=[], test_size=0., verbose=False,
     ):
         self._inputs_to_attributes(locals())
         self._MODEL_NAMES = ['model']
