@@ -5,15 +5,21 @@ import pandas as pd
 import os
 import pickle
 import numpy as np
+import warnings  
+import logging
 
-try:
-    import keras
-except ModuleNotFoundError:
-    pass
-try:
-    import tensorflow.keras as keras
-except ModuleNotFoundError:
-    raise ModuleNotFoundError('Could not find a working distribution of Keras!')
+with warnings.catch_warnings():  
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    try:
+        import keras
+        from keras.backend import clear_session
+    except ModuleNotFoundError:
+        pass
+    try:
+        import tensorflow.keras as keras
+        from tensorflow.keras.backend import clear_session
+    except ModuleNotFoundError:
+        raise ModuleNotFoundError('Could not find a working distribution of Keras!')
 
 _DEFAULT_PREDICTION_BATCH_SIZE = 50000
 
@@ -76,14 +82,20 @@ class AnomalyDetectionBase(sklearn.base.BaseEstimator, ABC):
         for k,model in models.items():
             mpath = '{}/{}'.format(path,k)
             model = _validate_model(model, k)
-            model.save(mpath)
+            save_dict[k] = model.to_json()
+            
+            log = logging.getLogger('tensorflow')
+            er0 = log.getEffectiveLevel()
+            log.setLevel(logging.ERROR)
+            model.save_weights(mpath)
+            log.setLevel(er0)
 
         with open('{}/params.pkl'.format(path), 'wb') as f:
             pickle.dump(save_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
         
         return self
 
-    def load(self, path):
+    def load(self, path, debug=False):
         """
         Load saved information into estimator from a file
         Parameters
@@ -110,14 +122,18 @@ class AnomalyDetectionBase(sklearn.base.BaseEstimator, ABC):
 
         if classname != self.__class__.__name__:
             raise ValueError('tried to load savefile of class "{}" into object with class "{}"!'.format(classname, self.__class__.__name__))
-
+        
         for k in self._model_names():
             model_path = '{}/{}'.format(path, k)
-            if os.path.exists(model_path):
-                save_dict[k] = keras.models.load_model(model_path)
+            if k in save_dict:
+                model = keras.models.model_from_json(save_dict[k])
+                if os.path.exists(model_path):
+                    # weights exist
+                    model.load_weights(model_path)
             else:
-                save_dict[k] = None
-
+                model = None
+            save_dict[k] = model
+    
         self.set_params(**save_dict)
 
         return self
