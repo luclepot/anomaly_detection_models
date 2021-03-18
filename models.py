@@ -17,16 +17,49 @@ except ModuleNotFoundError:
 
 _DEFAULT_PREDICTION_BATCH_SIZE = 50000
 
-class anomaly_detection_base(sklearn.base.BaseEstimator, ABC):
+
+### Abstract base class for AD models
+
+class AnomalyDetectionBase(sklearn.base.BaseEstimator, ABC):
     """base class which inherits from the sklearn base estimator. Provides broad functionality for 
     declaring new model classes, including defining save and load functions.
     
-    A few things are REQUIRED in the subclass for this class to work. In particular 
-    <path> should be a directory for the model; it may not yet exist.
+    A subclass should provide the following:
+
+    1. an __init__ method which passes all relevant estimator parameters to the 
+    _inputs_to_attributes function, most easily by way of calling locals()
+
+    2. A function override for the "fit" function, taking as inputs the arrays
+        x, y_sim, y_sr, w, and m, and returning a reference to the class instance (self)
+    
+    3. A function override for the "predict" function, taking as inputs an x-array
+        and returning an array of predictions
+    
+    4. A function override for the "_model_names" function, returning a list of the 
+        names of all keras models used for the estimator. This ensures proper saving
+
+    Additional helper functions may be defined as necessary, though good practice is
+    to prefix them with "_" to avoid namespace pollution.
     """
 
-    def save(self, path, mkdirs=True):
-        
+    # 
+    # ADDED FUNCTIONALITY (saving and loading)
+    # 
+
+    def save(self, path, mkdirs=True,):
+        """
+        Save estimator information to a directory
+        Parameters
+        ----------
+        path : str, required
+            specifies the directory in which to save the model
+        mkdirs : bool, default=True
+            whether or not to create the directory given, if it doesn't exist
+        Returns
+        -------
+        self : class instance
+            useful for cascading object calls
+        """        
         if not os.path.exists(path):
             if mkdirs:
                 os.makedirs(path)
@@ -37,7 +70,7 @@ class anomaly_detection_base(sklearn.base.BaseEstimator, ABC):
 
         models = dict()
         for k in list(save_dict.keys()):
-            if k in self._MODEL_NAMES:
+            if k in self._model_names():
                 models[k] = save_dict.pop(k)
 
         for k,model in models.items():
@@ -48,7 +81,21 @@ class anomaly_detection_base(sklearn.base.BaseEstimator, ABC):
         with open('{}/params.pkl'.format(path), 'wb') as f:
             pickle.dump(save_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
         
+        return self
+
     def load(self, path):
+        """
+        Load saved information into estimator from a file
+        Parameters
+        ----------
+        path : str, required
+            specifies a directory in which the desired model was saved.
+            should have at least the "params.pkl" pickle file in it.
+        Returns
+        -------
+        self : class instance
+            useful for cascading object calls
+        """
 
         if not os.path.exists(path):
             raise FileNotFoundError('pathname "{}" not found.'.format(path))
@@ -64,7 +111,7 @@ class anomaly_detection_base(sklearn.base.BaseEstimator, ABC):
         if classname != self.__class__.__name__:
             raise ValueError('tried to load savefile of class "{}" into object with class "{}"!'.format(classname, self.__class__.__name__))
 
-        for k in self._MODEL_NAMES:
+        for k in self._model_names():
             model_path = '{}/{}'.format(path, k)
             if os.path.exists(model_path):
                 save_dict[k] = keras.models.load_model(model_path)
@@ -73,18 +120,7 @@ class anomaly_detection_base(sklearn.base.BaseEstimator, ABC):
 
         self.set_params(**save_dict)
 
-    @abstractmethod
-    def fit(self, x, y):
-        raise NotImplementedError()
-    
-    @abstractmethod
-    def predict(self, x):
-        raise NotImplementedError
-
-    def _inputs_to_attributes(self, local_variables):
-        for k,v in local_variables.items():
-            if k != 'self':
-                setattr(self, k, v)
+        return self
 
     def get_params(self, deep=True, copy_models=False, exact_models=False):
         """
@@ -94,6 +130,15 @@ class anomaly_detection_base(sklearn.base.BaseEstimator, ABC):
         deep : bool, default=True
             If True, will return the parameters for this estimator and
             contained subobjects that are estimators.
+        copy_models : bool, default=False
+            If True, will return an identical (but copied) keras model
+            as the ones specified by the class variables of the return of _model_names.
+            Preserves model weights.
+        exact_models : bool, default=False
+            If True, will return the exact keras model as the one specified 
+            by the class variables of the return of _model_names. Overrides
+            parameter <copy_models>. If both copy_models and exact_models are false,
+            then the model is cloned using keras.models.clone_model.
         Returns
         -------
         params : dict
@@ -106,7 +151,7 @@ class anomaly_detection_base(sklearn.base.BaseEstimator, ABC):
                 deep_items = value.get_params().items()
                 out.update((key + '__' + k, val) for k, val in deep_items)
             
-            if key in self._MODEL_NAMES:
+            if key in self._model_names():
                 if isinstance(value, str):
                     out[key] = value
                 elif value is None:
@@ -116,13 +161,75 @@ class anomaly_detection_base(sklearn.base.BaseEstimator, ABC):
                     if exact_models:
                         out[key] = value
                     elif copy_models:
-                        out[key] = keras.models.clone_model(value)
+                        out[key] = keras.models.model_from_json(value.to_json())
+                        out[key].set_weights(value.get_weights())
                     else:
-                        out[key] = value.to_json()
+                        out[key] = keras.models.clone_model(value)
             else:
                 out[key] = value
         return out
         
+    def copy(self, copy_models=True, exact_models=False):
+        """
+        copy this model
+        Parameters
+        ----------
+        copy_models : bool, default=False
+            If True, will return an identical (but copied) keras model
+            as the ones specified by the class variables of the return of _model_names.
+            Preserves model weights.
+        exact_models : bool, default=False
+            If True, will return the exact keras model as the one specified 
+            by the class variables of the return of _model_names. Overrides
+            parameter <copy_models>. If both copy_models and exact_models are false,
+            then the model is cloned using keras.models.clone_model.
+        Returns
+        -------
+        __class__ : copy of this class
+        """
+        return self.__class__(**self.get_params(copy_models=copy_models, exact_models=exact_models))
+
+    #
+    # ABSTRACT METHODS (need to be redefined by derived classes)
+    #
+
+    @abstractmethod
+    def fit(self):
+        return self
+    
+    @abstractmethod
+    def predict(self):
+        return None
+        
+    @abstractmethod
+    def _model_names(self):
+        return []
+
+    #
+    # HELPER FUNCTIONS (just for init, basically)
+    #
+    
+    def _inputs_to_attributes(self, local_variables):
+        """
+        Set local variable dictionary as attributes; lazy __init__
+        Parameters
+        ----------
+        local_variables : dict, required
+            dictionary of key value pairs to set as class attributes to this
+            instance of self 
+        Returns
+        -------
+        """
+        for k,v in local_variables.items():
+            if k != 'self':
+                setattr(self, k, v)
+ 
+    def __copy__(self):
+        return self.copy(exact_models=False)
+
+
+### Helper functions for class definitions
+
 def _check_array_type(x):
     if isinstance(x, pd.DataFrame):
         return x.values
@@ -175,7 +282,10 @@ def _validate_model(model, name):
             raise ValueError('parameter <{}> with value "{}" could not be decoded.'.format(name, model))
     return model
 
-class SALAD(anomaly_detection_base):
+
+### Predefined class definitions for common model types
+
+class SALAD(AnomalyDetectionBase):
     def __init__(
         self, sb_model=None, model=None, 
         optimizer='adam', metrics=[], loss='binary_crossentropy', 
@@ -184,7 +294,6 @@ class SALAD(anomaly_detection_base):
         dctr_epsilon=1e-5,
     ):
         self._inputs_to_attributes(locals())
-        self._MODEL_NAMES = ['model', 'sb_model']
 
     def fit(
         self, x, y_sim=None, y_sr=None, w=None, m=None
@@ -200,7 +309,8 @@ class SALAD(anomaly_detection_base):
         sb_hist = self._fit_sb(x[sb_tag], y_sim[sb_tag], w=(w[sb_tag] if w is not None else w), m=m[sb_tag])
         sr_hist = self._fit_sr(x[sr_tag], y_sim[sr_tag], w=(w[sr_tag] if w is not None else w), m=m[sr_tag])
 
-        return sb_hist, sr_hist
+        self._history = sb_hist, sr_hist
+        return self
 
     def predict(
         self, x
@@ -238,7 +348,6 @@ class SALAD(anomaly_detection_base):
             verbose=self.verbose
         )
         
-
     def _fit_sr(
         self, x, y_sim, w=None, m=None
     ):
@@ -276,14 +385,16 @@ class SALAD(anomaly_detection_base):
             verbose=self.verbose
         )
 
-class data_vs_sim(anomaly_detection_base):
+    def _model_names(self):
+        return ['model', 'sb_model']
+
+class DataVsSim(AnomalyDetectionBase):
     def __init__(
         self, model=None, optimizer='adam', metrics=[], 
         loss='binary_crossentropy', epochs=10, batch_size=1000,
         compile=True, callbacks=[], test_size=0., verbose=False,
     ):
         self._inputs_to_attributes(locals())
-        self._MODEL_NAMES = ['model']
 
     def fit(
         self, x, y_sim=None, y_sr=None, w=None, m=None
@@ -303,7 +414,7 @@ class data_vs_sim(anomaly_detection_base):
         if self.compile:
             self.model.compile(loss=self.loss, optimizer=self.optimizer, metrics=self.metrics)
 
-        return self.model.fit(
+        self._history = self.model.fit(
             x, y_sim,
             epochs=self.epochs,
             callbacks=self.callbacks,
@@ -312,20 +423,23 @@ class data_vs_sim(anomaly_detection_base):
             sample_weight=w,
             verbose=self.verbose
         )
+        return self
 
     def predict(
         self, x
     ):
         return self.model.predict(x, batch_size=_DEFAULT_PREDICTION_BATCH_SIZE).squeeze()
 
-class cwola(anomaly_detection_base):
+    def _model_names(self):
+        return ['model']
+
+class CWoLa(AnomalyDetectionBase):
     def __init__(
         self, model=None, optimizer='adam', metrics=[], 
         loss='binary_crossentropy', epochs=10, batch_size=1000,
         compile=True, callbacks=[], test_size=0., verbose=False,
     ):
         self._inputs_to_attributes(locals())
-        self._MODEL_NAMES = ['model']
 
     def fit(
         self, x, y_sim=None, y_sr=None, w=None, m=None
@@ -346,7 +460,7 @@ class cwola(anomaly_detection_base):
         if self.compile:
             self.model.compile(loss=self.loss, optimizer=self.optimizer, metrics=self.metrics)
 
-        return self.model.fit(
+        self._history = self.model.fit(
             x, y_sr,
             epochs=self.epochs,
             callbacks=self.callbacks,
@@ -356,19 +470,23 @@ class cwola(anomaly_detection_base):
             verbose=self.verbose
         )
 
+        return self
+
     def predict(
         self, x
     ):
         return self.model.predict(x, batch_size=_DEFAULT_PREDICTION_BATCH_SIZE).squeeze()
 
-class sacwola(anomaly_detection_base):
+    def _model_names(self):
+        return ['model']
+
+class SACWoLa(AnomalyDetectionBase):
     def __init__(
-        self, model=None, optimizer='adam', metrics=[], 
+        self, model=None, optimizer='adam', metrics=[], lambda_=1.0,
         loss='binary_crossentropy', epochs=10, batch_size=1000,
         compile=True, callbacks=[], test_size=0., verbose=False,
     ):
         self._inputs_to_attributes(locals())
-        self._MODEL_NAMES = ['model']
 
     def fit(
         self, x, y_sim=None, y_sr=None, w=None, m=None
@@ -376,30 +494,39 @@ class sacwola(anomaly_detection_base):
 
         if y_sr is None:
             raise ValueError('parameter <y_sr> must hold signal region/sideband tags!')
+        if y_sim is None:
+            raise ValueError('parameter <y_sim> must hold simulation/data tags!')
 
         self.model = _validate_model(self.model, 'model')
         x, y_sim, y_sr, w = _check_training_params(self.model, x, y_sim, y_sr, w)
         
-        if y_sim is not None:
-            x = x[y_sim == 1]
-            y_sr = y_sr[y_sim == 1]
-            if w is not None:
-                w = w[y_sim == 1]
+        w_sacwola = np.ones_like(y_sim)
+        w_sacwola[y_sim == 0] = self.lambda_
+
+        if w is not None:
+            w_sacwola *= w
+
+        y_sacwola = np.abs(y_sr.astype(int) - (~y_sim.astype(bool)).astype(int))
         
         if self.compile:
             self.model.compile(loss=self.loss, optimizer=self.optimizer, metrics=self.metrics)
 
-        return self.model.fit(
-            x, y_sr,
+        self._history = self.model.fit(
+            x, y_sacwola,
             epochs=self.epochs,
             callbacks=self.callbacks,
             validation_split=self.test_size,
             batch_size=int(self.batch_size),
-            sample_weight=w,
+            sample_weight=w_sacwola,
             verbose=self.verbose
         )
+
+        return self
 
     def predict(
         self, x
     ):
         return self.model.predict(x, batch_size=_DEFAULT_PREDICTION_BATCH_SIZE).squeeze()
+
+    def _model_names(self):
+        return ['model']
