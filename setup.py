@@ -20,7 +20,8 @@ REQUIRED = [
     'Keras>=2.2.4',
     'scikit-learn>=0.21.2',
     'pickleshare>=0.7.5',
-    'pandas>=0.25.1'
+    'pandas>=0.25.1',
+    'tensorflow>=1.12.0'
 ]
 
 with open("README.md", "r", encoding="utf-8") as fh:
