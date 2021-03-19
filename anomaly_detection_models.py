@@ -83,12 +83,7 @@ class AnomalyDetectionBase(sklearn.base.BaseEstimator, ABC):
             mpath = '{}/{}'.format(path,k)
             model = _validate_model(model, k)
             save_dict[k] = model.to_json()
-            
-            log = logging.getLogger('tensorflow')
-            er0 = log.getEffectiveLevel()
-            log.setLevel(logging.ERROR)
-            model.save_weights(mpath)
-            log.setLevel(er0)
+            model.save(mpath)
 
         with open('{}/params.pkl'.format(path), 'wb') as f:
             pickle.dump(save_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -125,11 +120,11 @@ class AnomalyDetectionBase(sklearn.base.BaseEstimator, ABC):
         
         for k in self._model_names():
             model_path = '{}/{}'.format(path, k)
-            if k in save_dict:
+            # if k in save_dict:
+            if os.path.exists(model_path):
+                model.load(model_path)
+            elif k in save_dict:
                 model = keras.models.model_from_json(save_dict[k])
-                if os.path.exists(model_path):
-                    # weights exist
-                    model.load_weights(model_path)
             else:
                 model = None
             save_dict[k] = model
@@ -273,8 +268,8 @@ def _check_training_params(model, x, *y_args):
     if len(np.unique(np.array(arg_shapes))) > 1:
         raise AttributeError('input y value array shapes do not match')
 
-    if not isinstance(model, keras.Model):
-        raise AttributeError('model is not a keras.Model instance!')
+    # if not isinstance(model, keras.Model):
+    #     raise AttributeError('model is not a keras.Model instance!')
         
     input_match = model.input_shape[1] == np.array(x.shape)
     
@@ -292,6 +287,7 @@ def _validate_model(model, name):
     if model is None:
         raise ValueError('parameter <{}> is None. Please set it to a valid keras model/keras json architecture.'.format(name))
     elif isinstance(model, str):
+        print('decoding')
         try:
             model = keras.models.model_from_json(model)
         except JSONDecodeError:
@@ -348,8 +344,7 @@ class SALAD(AnomalyDetectionBase):
             m = m[:,np.newaxis]
         x = np.concatenate([m, x], axis=1)
         x, y_sim, w = _check_training_params(self.sb_model, x, y_sim, w)
-        
-
+    
 
         if self.compile:
             self.sb_model.compile(loss=self.loss, optimizer=self.optimizer, metrics=self.metrics)
