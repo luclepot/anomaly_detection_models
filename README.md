@@ -4,9 +4,14 @@ Repository with some useful anomaly detection model definitions.
 
 ## install
 
-clone this repository, and run 
+for latest stable version
+
+    pip install anomaly_detection_models [--user]
+
+for most recent version, use
     
-    pip install . [--user]
+    git clone git@github.com:luclepot/anomaly_detection_models.git
+    pip install . [--user] 
 
 with the ``--user`` argument specifying local installation.
 
