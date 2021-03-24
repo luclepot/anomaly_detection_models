@@ -13,12 +13,12 @@ with warnings.catch_warnings():
     try:
         import keras
         from keras.backend import clear_session
-    except ModuleNotFoundError:
+    except (ModuleNotFoundError, ImportError) as e:
         pass
     try:
         import tensorflow.keras as keras
         from tensorflow.keras.backend import clear_session
-    except ModuleNotFoundError:
+    except (ModuleNotFoundError, ImportError) as e:
         raise ModuleNotFoundError('Could not find a working distribution of Keras!')
 
 _DEFAULT_PREDICTION_BATCH_SIZE = 50000
