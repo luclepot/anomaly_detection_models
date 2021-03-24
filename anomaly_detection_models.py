@@ -122,7 +122,7 @@ class AnomalyDetectionBase(sklearn.base.BaseEstimator, ABC):
             model_path = '{}/{}'.format(path, k)
             # if k in save_dict:
             if os.path.exists(model_path):
-                model.load(model_path)
+                model = keras.models.load_model(model_path)
             elif k in save_dict:
                 model = keras.models.model_from_json(save_dict[k])
             else:
