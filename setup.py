@@ -7,7 +7,7 @@ import setuptools
 # Package meta-data.
 NAME = 'anomaly_detection_models'
 DESCRIPTION = 'Models for anomaly detection; see e.g. https://arxiv.org/abs/2009.02205'
-VERSION = '0.1.2'
+VERSION = '0.1.3'
 AUTHOR = 'Luc Le Pottier'
 EMAIL = 'luclepot@umich.edu'
 URL = 'https://github.com/luclepot/anomaly_detection_models'

@@ -338,9 +338,19 @@ def _validate_model(model, name):
 
 ### functions for user usage
 
-def autoload(path):
+def autoload(path, **kwargs):
     """
-    
+    Dynamically load a model without a specified base class. Class used must be included in 
+    this module, or else specified by name in as a keyword argument.
+    Parameters
+    ----------
+    path : str, required
+        specifies a directory in which the desired model was saved.
+        should have at least the "params.pkl" pickle file in it.
+    Returns
+    -------
+    AnomalyDetectionBase derived class
+        loaded model, if its correct classname could be found
     """
     params, classname = AnomalyDetectionBase._load_params(path)
     if classname in globals():
