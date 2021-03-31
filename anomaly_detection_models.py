@@ -19,7 +19,7 @@ with warnings.catch_warnings():
         import tensorflow.keras as keras
         from tensorflow.keras.backend import clear_session
     except (ModuleNotFoundError, ImportError) as e:
-        raise ModuleNotFoundError('Could not find a working distribution of Keras!')
+        raise ModuleNotFoundError('Could not find a working distribution of Keras and Tensorflow! Please install to use this module.')
 
 _DEFAULT_PREDICTION_BATCH_SIZE = 50000
 
@@ -90,7 +90,7 @@ class AnomalyDetectionBase(sklearn.base.BaseEstimator, ABC):
         
         return self
 
-    def load(self, path, debug=False):
+    def load(self, path):
         """
         Load saved information into estimator from a file
         Parameters
@@ -104,32 +104,12 @@ class AnomalyDetectionBase(sklearn.base.BaseEstimator, ABC):
             useful for cascading object calls
         """
 
-        if not os.path.exists(path):
-            raise FileNotFoundError('pathname "{}" not found.'.format(path))
-        
-        pkl_path = '{}/params.pkl'.format(path)
-        if not os.path.exists(pkl_path):
-            raise FileNotFoundError('file "{}" not found. cannot load model.'.format(pkl_path))
-        with open(pkl_path, 'rb') as f:
-            save_dict = pickle.load(f)
-        
-        classname = save_dict.pop('classname')
+        save_dict, classname = self._load_params(path)
 
         if classname != self.__class__.__name__:
             raise ValueError('tried to load savefile of class "{}" into object with class "{}"!'.format(classname, self.__class__.__name__))
         
-        for k in self._model_names():
-            model_path = '{}/{}'.format(path, k)
-            # if k in save_dict:
-            if os.path.exists(model_path):
-                model = keras.models.load_model(model_path)
-            elif k in save_dict:
-                model = keras.models.model_from_json(save_dict[k])
-            else:
-                model = None
-            save_dict[k] = model
-    
-        self.set_params(**save_dict)
+        self._load_models(path, save_dict, classname)
 
         return self
 
@@ -219,7 +199,7 @@ class AnomalyDetectionBase(sklearn.base.BaseEstimator, ABC):
     #
     # HELPER FUNCTIONS (just for init, basically)
     #
-    
+
     def _inputs_to_attributes(self, local_variables):
         """
         Set local variable dictionary as attributes; lazy __init__
@@ -234,10 +214,71 @@ class AnomalyDetectionBase(sklearn.base.BaseEstimator, ABC):
         for k,v in local_variables.items():
             if k != 'self':
                 setattr(self, k, v)
- 
+
+
+    @staticmethod
+    def _load_params(path):
+        """
+        Load saved information into estimator from a file
+        Parameters. Useful for loading generic models.
+        ----------
+        path : str, required
+            specifies a directory in which the desired model was saved.
+            should have at least the "params.pkl" pickle file in it.
+        Returns
+        -------
+        save_dict : dict
+            dictionary of parameters from found file
+        classname : str
+            classname of class of saved model
+        """
+
+        if not os.path.exists(path):
+            raise FileNotFoundError('pathname "{}" not found.'.format(path))
+        
+        pkl_path = '{}/params.pkl'.format(path)
+        if not os.path.exists(pkl_path):
+            raise FileNotFoundError('file "{}" not found. cannot load model.'.format(pkl_path))
+        with open(pkl_path, 'rb') as f:
+            save_dict = pickle.load(f)
+        
+        classname = save_dict.pop('classname')
+        return save_dict, classname
+
+    def _load_models(self, path, save_dict, classname):
+        """
+        Load saved information into estimator from a file
+        Parameters
+        ----------
+        path : str, required
+            specifies a directory in which the desired model was saved.
+            should have at least the "params.pkl" pickle file in it.
+        save_dict : dict, required
+            dictionary of parameters from found file
+        classname : str, required
+            classname of class of saved model
+        Returns
+        -------
+        self : class instance
+            useful for cascading object calls
+        """
+        for k in self._model_names():
+            model_path = '{}/{}'.format(path, k)
+            # if k in save_dict:
+            if os.path.exists(model_path):
+                model = keras.models.load_model(model_path)
+            elif k in save_dict:
+                model = keras.models.model_from_json(save_dict[k])
+            else:
+                model = None
+            save_dict[k] = model
+    
+        self.set_params(**save_dict)
+
+        return self
+
     def __copy__(self):
         return self.copy(exact_models=False)
-
 
 ### Helper functions for class definitions
 
@@ -294,6 +335,18 @@ def _validate_model(model, name):
             raise ValueError('parameter <{}> with value "{}" could not be decoded.'.format(name, model))
     return model
 
+
+### functions for user usage
+
+def autoload(path):
+    """
+    
+    """
+    params, classname = AnomalyDetectionBase._load_params(path)
+    if classname in globals():
+        return globals()[classname]()._load_models(path, params, classname)
+    else:
+        raise AttributeError('classname "{}" from model at path {} not known!'.format(classname, path))
 
 ### Predefined class definitions for common model types
 
