@@ -72,6 +72,9 @@ class AnomalyDetectionBase(sklearn.base.BaseEstimator, ABC):
             else:
                 raise FileNotFoundError('pathname "{}" not found. Set <mkdirs=True> to create directories.'.format(path))
         save_dict = self.get_params(exact_models=True)
+        if hasattr(self, '_history'):
+            save_dict['_history'] = self._history
+        
         save_dict['classname'] = self.__class__.__name__
 
         models = dict()
@@ -272,7 +275,8 @@ class AnomalyDetectionBase(sklearn.base.BaseEstimator, ABC):
             else:
                 model = None
             save_dict[k] = model
-    
+        if '_history' in save_dict:
+            self._history = save_dict.pop('_history')
         self.set_params(**save_dict)
 
         return self
@@ -384,7 +388,7 @@ class SALAD(AnomalyDetectionBase):
         sb_hist = self._fit_sb(x[sb_tag], y_sim[sb_tag], w=(w[sb_tag] if w is not None else w), m=m[sb_tag])
         sr_hist = self._fit_sr(x[sr_tag], y_sim[sr_tag], w=(w[sr_tag] if w is not None else w), m=m[sr_tag])
 
-        self._history = sb_hist, sr_hist
+        self._history = sb_hist.history, sr_hist.history
         return self
 
     def predict(
@@ -496,7 +500,7 @@ class DataVsSim(AnomalyDetectionBase):
             batch_size=int(self.batch_size),
             sample_weight=w,
             verbose=self.verbose
-        )
+        ).history
         return self
 
     def predict(
@@ -542,7 +546,7 @@ class CWoLa(AnomalyDetectionBase):
             batch_size=int(self.batch_size),
             sample_weight=w,
             verbose=self.verbose
-        )
+        ).history
 
         return self
 
@@ -593,7 +597,7 @@ class SACWoLa(AnomalyDetectionBase):
             batch_size=int(self.batch_size),
             sample_weight=w_sacwola,
             verbose=self.verbose
-        )
+        ).history
 
         return self
 
